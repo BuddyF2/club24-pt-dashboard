@@ -1,15 +1,7 @@
 # trainer_app.py
-# Club 24 - Multi-Club PT Score Dashboard with Website Login
-# Custom email/password login stored in PostgreSQL.
-# Trainer name and club are auto-filled from the login.
-# Only approved director emails can access the director dashboard.
-# Only directors can create trainer logins.
-# Trainers are locked to one submission per week.
-# Users can change their own password.
-# Directors can upload documents for trainers to view and download.
-# Supported in-app previews: PDF, PNG/JPG/JPEG, TXT, CSV, XLS, XLSX.
+# Club 24 - Multi-Club PT Management System
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 import base64
 import hashlib
@@ -243,7 +235,27 @@ def init_db():
             )
         )
 
-        # Add pack columns for existing databases safely
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS trainer_calendar_events (
+                    id SERIAL PRIMARY KEY,
+                    trainer_email VARCHAR(255) NOT NULL,
+                    trainer_name VARCHAR(100) NOT NULL,
+                    club VARCHAR(50) NOT NULL,
+                    event_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    event_title VARCHAR(255) NOT NULL,
+                    notes TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
         conn.execute(
             text(
                 """
@@ -252,7 +264,6 @@ def init_db():
                 """
             )
         )
-
         conn.execute(
             text(
                 """
@@ -261,7 +272,6 @@ def init_db():
                 """
             )
         )
-
         conn.execute(
             text(
                 """
@@ -270,7 +280,6 @@ def init_db():
                 """
             )
         )
-
         conn.execute(
             text(
                 """
@@ -279,21 +288,11 @@ def init_db():
                 """
             )
         )
-
         conn.execute(
             text(
                 """
                 ALTER TABLE submissions
                 ADD COLUMN IF NOT EXISTS pack_24_flex INTEGER NOT NULL DEFAULT 0
-                """
-            )
-        )
-
-        conn.execute(
-            text(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS submissions_unique_trainer_week_idx
-                ON submissions (week_start, trainer_name, club)
                 """
             )
         )
@@ -339,9 +338,36 @@ def init_db():
             )
 
 
+def create_submission_unique_index():
+    engine = get_engine()
+    with engine.begin() as conn:
+        dupes = conn.execute(
+            text(
+                """
+                SELECT week_start, trainer_name, club, COUNT(*) AS c
+                FROM submissions
+                GROUP BY week_start, trainer_name, club
+                HAVING COUNT(*) > 1
+                LIMIT 1
+                """
+            )
+        ).fetchone()
+
+        if dupes is None:
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS submissions_unique_trainer_week_idx
+                    ON submissions (week_start, trainer_name, club)
+                    """
+                )
+            )
+
+
 def get_settings() -> Dict:
     engine = get_engine()
-    df = pd.read_sql("SELECT * FROM scoring_settings WHERE id = 1", engine)
+    with engine.begin() as conn:
+        df = pd.read_sql(text("SELECT * FROM scoring_settings WHERE id = 1"), conn)
 
     if df.empty:
         raise ValueError("Scoring settings not found.")
@@ -370,14 +396,17 @@ def get_user_account(email: str) -> Optional[Dict]:
 
 def get_all_user_accounts() -> pd.DataFrame:
     engine = get_engine()
-    return pd.read_sql(
-        """
-        SELECT email, full_name, club, role, is_active, created_at, updated_at
-        FROM user_accounts
-        ORDER BY role DESC, club, full_name
-        """,
-        engine,
-    )
+    with engine.begin() as conn:
+        return pd.read_sql(
+            text(
+                """
+                SELECT email, full_name, club, role, is_active, created_at, updated_at
+                FROM user_accounts
+                ORDER BY role DESC, club, full_name
+                """
+            ),
+            conn,
+        )
 
 
 def add_trainer_document(
@@ -440,33 +469,35 @@ def add_trainer_document(
 
 def get_trainer_documents(club: Optional[str] = None) -> pd.DataFrame:
     engine = get_engine()
+    with engine.begin() as conn:
+        if club and club != "All Clubs":
+            return pd.read_sql(
+                text(
+                    """
+                    SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
+                           club_scope, uploaded_by_email, uploaded_at, updated_at
+                    FROM trainer_documents
+                    WHERE is_active = TRUE
+                      AND (club_scope = 'All Clubs' OR club_scope = :club_scope)
+                    ORDER BY uploaded_at DESC, title ASC
+                    """
+                ),
+                conn,
+                params={"club_scope": club},
+            )
 
-    if club and club != "All Clubs":
-        query = text(
-            """
-            SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
-                   club_scope, uploaded_by_email, uploaded_at, updated_at
-            FROM trainer_documents
-            WHERE is_active = TRUE
-              AND (club_scope = 'All Clubs' OR club_scope = :club_scope)
-            ORDER BY uploaded_at DESC, title ASC
-            """
+        return pd.read_sql(
+            text(
+                """
+                SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
+                       club_scope, uploaded_by_email, uploaded_at, updated_at
+                FROM trainer_documents
+                WHERE is_active = TRUE
+                ORDER BY uploaded_at DESC, title ASC
+                """
+            ),
+            conn,
         )
-        with engine.begin() as conn:
-            result = conn.execute(query, {"club_scope": club})
-            rows = result.mappings().all()
-        return pd.DataFrame(rows)
-
-    return pd.read_sql(
-        """
-        SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
-               club_scope, uploaded_by_email, uploaded_at, updated_at
-        FROM trainer_documents
-        WHERE is_active = TRUE
-        ORDER BY uploaded_at DESC, title ASC
-        """,
-        engine,
-    )
 
 
 def get_trainer_document_file(document_id: int) -> Optional[Dict]:
@@ -716,10 +747,122 @@ def add_submission(
 
 def get_submissions() -> pd.DataFrame:
     engine = get_engine()
-    return pd.read_sql(
-        "SELECT * FROM submissions ORDER BY week_start DESC, submitted_at DESC",
-        engine,
-    )
+    with engine.begin() as conn:
+        return pd.read_sql(
+            text("SELECT * FROM submissions ORDER BY week_start DESC, submitted_at DESC"),
+            conn,
+        )
+
+
+def add_calendar_event(
+    trainer_email: str,
+    trainer_name: str,
+    club: str,
+    event_date: date,
+    start_time: time,
+    end_time: time,
+    event_title: str,
+    notes: str,
+):
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO trainer_calendar_events (
+                    trainer_email,
+                    trainer_name,
+                    club,
+                    event_date,
+                    start_time,
+                    end_time,
+                    event_title,
+                    notes,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :trainer_email,
+                    :trainer_name,
+                    :club,
+                    :event_date,
+                    :start_time,
+                    :end_time,
+                    :event_title,
+                    :notes,
+                    TRUE,
+                    :created_at,
+                    :updated_at
+                )
+                """
+            ),
+            {
+                "trainer_email": trainer_email.strip().lower(),
+                "trainer_name": trainer_name.strip(),
+                "club": club,
+                "event_date": event_date,
+                "start_time": start_time,
+                "end_time": end_time,
+                "event_title": event_title.strip(),
+                "notes": notes.strip(),
+                "created_at": datetime.now(EST),
+                "updated_at": datetime.now(EST),
+            },
+        )
+
+
+def get_calendar_events(
+    trainer_email: Optional[str] = None,
+    club: Optional[str] = None,
+) -> pd.DataFrame:
+    engine = get_engine()
+
+    base_query = """
+        SELECT id, trainer_email, trainer_name, club, event_date, start_time, end_time,
+               event_title, notes, created_at, updated_at
+        FROM trainer_calendar_events
+        WHERE is_active = TRUE
+    """
+    conditions = []
+    params = {}
+
+    if trainer_email:
+        conditions.append("LOWER(trainer_email) = LOWER(:trainer_email)")
+        params["trainer_email"] = trainer_email.strip().lower()
+
+    if club and club != "All":
+        conditions.append("club = :club")
+        params["club"] = club
+
+    if conditions:
+        base_query += " AND " + " AND ".join(conditions)
+
+    base_query += " ORDER BY event_date ASC, start_time ASC, trainer_name ASC"
+
+    with engine.begin() as conn:
+        return pd.read_sql(text(base_query), conn, params=params)
+
+
+def deactivate_calendar_event(event_id: int):
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE trainer_calendar_events
+                SET is_active = FALSE,
+                    updated_at = :updated_at
+                WHERE id = :event_id
+                """
+            ),
+            {
+                "event_id": int(event_id),
+                "updated_at": datetime.now(EST),
+            },
+        )
 
 
 # -------------------------------------------------
@@ -933,6 +1076,45 @@ def preview_document(doc_record: Dict):
     )
 
 
+def build_calendar_view(df: pd.DataFrame, view_mode: str, anchor_date: date) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    frame = df.copy()
+    frame["event_date"] = pd.to_datetime(frame["event_date"]).dt.date
+    frame["start_time_str"] = frame["start_time"].astype(str).str.slice(0, 5)
+    frame["end_time_str"] = frame["end_time"].astype(str).str.slice(0, 5)
+
+    if view_mode == "Day":
+        frame = frame[frame["event_date"] == anchor_date]
+    elif view_mode == "Week":
+        week_start = anchor_date - timedelta(days=anchor_date.weekday())
+        week_end = week_start + timedelta(days=6)
+        frame = frame[(frame["event_date"] >= week_start) & (frame["event_date"] <= week_end)]
+    else:
+        frame = frame[
+            (pd.to_datetime(frame["event_date"]).dt.month == anchor_date.month)
+            & (pd.to_datetime(frame["event_date"]).dt.year == anchor_date.year)
+        ]
+
+    if frame.empty:
+        return frame
+
+    return frame[
+        ["event_date", "start_time_str", "end_time_str", "trainer_name", "club", "event_title", "notes"]
+    ].rename(
+        columns={
+            "event_date": "Date",
+            "start_time_str": "Start",
+            "end_time_str": "End",
+            "trainer_name": "Trainer",
+            "club": "Club",
+            "event_title": "Title",
+            "notes": "Notes",
+        }
+    )
+
+
 # -------------------------------------------------
 # UI SECTIONS
 # -------------------------------------------------
@@ -1008,11 +1190,92 @@ def render_trainer_documents_tab(user: Dict):
         preview_document(doc_record)
 
 
+def render_trainer_calendar_tab(user: Dict):
+    st.subheader("Trainer Calendar")
+    st.write("Add and manage your training schedule here.")
+
+    with st.form("trainer_calendar_form"):
+        event_date = st.date_input("Event Date", value=datetime.now(EST).date())
+        col1, col2 = st.columns(2)
+        with col1:
+            start_time_val = st.time_input("Start Time", value=time(9, 0))
+        with col2:
+            end_time_val = st.time_input("End Time", value=time(10, 0))
+        event_title = st.text_input("Event Title")
+        notes = st.text_area("Notes")
+        add_event = st.form_submit_button("Add Calendar Event")
+
+        if add_event:
+            if not event_title.strip():
+                st.error("Event title is required.")
+            elif end_time_val <= start_time_val:
+                st.error("End time must be later than start time.")
+            else:
+                try:
+                    add_calendar_event(
+                        trainer_email=user["email"],
+                        trainer_name=user["full_name"],
+                        club=user["club"],
+                        event_date=event_date,
+                        start_time=start_time_val,
+                        end_time=end_time_val,
+                        event_title=event_title,
+                        notes=notes,
+                    )
+                    st.success("Calendar event added.")
+                    st.rerun()
+                except SQLAlchemyError as e:
+                    st.error(f"Could not add calendar event: {e}")
+
+    try:
+        events = get_calendar_events(trainer_email=user["email"])
+    except SQLAlchemyError as e:
+        st.error(f"Could not load calendar events: {e}")
+        return
+
+    if events.empty:
+        st.info("No calendar events yet.")
+        return
+
+    view_mode = st.selectbox("Calendar View", ["Day", "Week", "Month"], key="trainer_calendar_view")
+    anchor_date = st.date_input("Calendar Date", value=datetime.now(EST).date(), key="trainer_calendar_anchor")
+    view_df = build_calendar_view(events, view_mode, anchor_date)
+
+    if view_df.empty:
+        st.info(f"No events in this {view_mode.lower()} view.")
+    else:
+        st.dataframe(view_df, use_container_width=True, hide_index=True)
+
+    st.write("### Remove Event")
+    events_display = events.copy()
+    events_display["label"] = events_display.apply(
+        lambda row: f"{row['event_date']} | {str(row['start_time'])[:5]}-{str(row['end_time'])[:5]} | {row['event_title']}",
+        axis=1,
+    )
+
+    selected_event_id = st.selectbox(
+        "Select your event",
+        options=events_display["id"].tolist(),
+        format_func=lambda event_id: events_display.loc[events_display["id"] == event_id, "label"].iloc[0],
+        key="trainer_remove_event_id",
+    )
+
+    if st.button("Remove Selected Event"):
+        try:
+            deactivate_calendar_event(int(selected_event_id))
+            st.success("Event removed.")
+            st.rerun()
+        except SQLAlchemyError as e:
+            st.error(f"Could not remove event: {e}")
+
+
 def render_trainer_view(user: Dict):
     trainer_name = user["full_name"]
     club = user["club"]
 
-    tab1, tab2, tab3 = st.tabs(["Weekly Submission", "Trainer Documents", "Change Password"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Weekly Submission", "Calendar", "Trainer Documents", "Change Password"]
+    )
 
     with tab1:
         st.subheader("Weekly Trainer Submission")
@@ -1091,17 +1354,20 @@ def render_trainer_view(user: Dict):
         st.caption("Trainer score stays hidden from trainers.")
 
     with tab2:
-        render_trainer_documents_tab(user)
+        render_trainer_calendar_tab(user)
 
     with tab3:
+        render_trainer_documents_tab(user)
+
+    with tab4:
         render_change_password_tab(user)
 
 
 def render_director_dashboard(user: Dict):
     st.subheader("PT Director Dashboard")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Dashboard", "Scoring Setup", "User Logins", "Trainer Documents", "Change Password", "Exports"]
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        ["Dashboard", "Master Calendar", "Scoring Setup", "User Logins", "Trainer Documents", "Change Password", "Exports"]
     )
 
     with tab1:
@@ -1190,6 +1456,51 @@ def render_director_dashboard(user: Dict):
             st.dataframe(filtered, use_container_width=True)
 
     with tab2:
+        st.write("### Master Calendar")
+
+        try:
+            events = get_calendar_events()
+        except SQLAlchemyError as e:
+            st.error(f"Could not load master calendar: {e}")
+            events = pd.DataFrame()
+
+        if events.empty:
+            st.info("No trainer calendar events yet.")
+        else:
+            selected_calendar_club = st.selectbox("Filter Calendar by Club", ["All"] + CLUBS, key="director_calendar_club")
+
+            event_source = events.copy()
+            if selected_calendar_club != "All":
+                event_source = event_source[event_source["club"] == selected_calendar_club]
+
+            trainer_options = ["All"] + sorted(event_source["trainer_name"].astype(str).unique().tolist())
+            selected_calendar_trainer = st.selectbox("Filter Calendar by Trainer", trainer_options, key="director_calendar_trainer")
+
+            if selected_calendar_trainer != "All":
+                event_source = event_source[event_source["trainer_name"] == selected_calendar_trainer]
+
+            calendar_view = st.selectbox("Calendar View", ["Day", "Week", "Month"], key="director_calendar_view")
+            calendar_anchor_date = st.date_input("Calendar Date", value=datetime.now(EST).date(), key="director_calendar_anchor")
+
+            master_view_df = build_calendar_view(event_source, calendar_view, calendar_anchor_date)
+
+            if master_view_df.empty:
+                st.info(f"No events in this {calendar_view.lower()} view.")
+            else:
+                st.dataframe(master_view_df, use_container_width=True, hide_index=True)
+
+            st.write("### All Active Calendar Events")
+            events_table = event_source.copy()
+            events_table["start_time"] = events_table["start_time"].astype(str).str.slice(0, 5)
+            events_table["end_time"] = events_table["end_time"].astype(str).str.slice(0, 5)
+
+            st.dataframe(
+                events_table[["event_date", "start_time", "end_time", "trainer_name", "club", "event_title", "notes"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tab3:
         try:
             settings = get_settings()
         except SQLAlchemyError as e:
@@ -1255,9 +1566,7 @@ def render_director_dashboard(user: Dict):
             save = st.form_submit_button("Save Scoring Settings")
 
             if save:
-                total_weight = (
-                    weight_hours + weight_booked + weight_completed + weight_pt_sold
-                )
+                total_weight = weight_hours + weight_booked + weight_completed + weight_pt_sold
                 if round(total_weight, 2) != 100.0:
                     st.error("Weights must total exactly 100.")
                 else:
@@ -1277,7 +1586,7 @@ def render_director_dashboard(user: Dict):
                     except SQLAlchemyError as e:
                         st.error(f"Could not update settings: {e}")
 
-    with tab3:
+    with tab4:
         st.write("### Create or Reset Trainer Login")
         st.caption("Only directors can create logins. Trainer login uses email + password.")
 
@@ -1333,9 +1642,9 @@ def render_director_dashboard(user: Dict):
             "Director access is limited to the approved emails and uses the secret `DIRECTOR_MASTER_PASSWORD`."
         )
 
-    with tab4:
+    with tab5:
         st.write("### Upload Trainer Documents")
-        st.caption("Upload files for all clubs or a specific club. Trainers can view and download approved files from their portal.")
+        st.caption("Upload files for all clubs or a specific club. Trainers can view or download approved files from their portal.")
 
         with st.form("upload_documents_form"):
             document_scope = st.selectbox("Document Visibility", ["All Clubs"] + CLUBS)
@@ -1394,6 +1703,7 @@ def render_director_dashboard(user: Dict):
             else:
                 docs_display = docs.copy()
                 docs_display["size"] = docs_display["file_size_bytes"].apply(format_file_size)
+
                 st.dataframe(
                     docs_display[["id", "title", "original_filename", "file_ext", "club_scope", "size", "uploaded_by_email", "uploaded_at"]],
                     use_container_width=True,
@@ -1401,7 +1711,7 @@ def render_director_dashboard(user: Dict):
                 )
 
                 disable_doc_id = st.selectbox(
-                    "Select Document to Remove",
+                    "Select Document to Remove / Preview",
                     options=docs_display["id"].tolist(),
                     format_func=lambda doc_id: f"{docs_display.loc[docs_display['id'] == doc_id, 'title'].iloc[0]} ({docs_display.loc[docs_display['id'] == doc_id, 'club_scope'].iloc[0]})",
                     key="disable_document_id",
@@ -1421,10 +1731,10 @@ def render_director_dashboard(user: Dict):
         except SQLAlchemyError as e:
             st.error(f"Could not load documents: {e}")
 
-    with tab5:
+    with tab6:
         render_change_password_tab(user)
 
-    with tab6:
+    with tab7:
         try:
             df = get_submissions()
             settings = get_settings()
@@ -1475,6 +1785,7 @@ def render_director_dashboard(user: Dict):
 # -------------------------------------------------
 try:
     init_db()
+    create_submission_unique_index()
 except (ValueError, SQLAlchemyError) as e:
     st.error(f"Database connection failed: {e}")
     st.info("Set DATABASE_URL first, then restart the app.")
