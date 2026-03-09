@@ -53,12 +53,20 @@ DEFAULT_SCORING = {
     "target_hours": 25,
     "target_booked": 8,
     "target_completed": 6,
-    "target_pt_sold": 1000,
+    "target_pt_sold": 20,
     "weight_hours": 20,
     "weight_booked": 25,
     "weight_completed": 25,
     "weight_pt_sold": 30,
 }
+
+PACK_TYPES = [
+    "1x per Week",
+    "2x per Week",
+    "8 Flex Pack",
+    "12 Flex Pack",
+    "24 Flex Pack",
+]
 
 PBKDF2_ITERATIONS = 200_000
 
@@ -156,6 +164,11 @@ def init_db():
                     kickoffs_booked INTEGER NOT NULL,
                     kickoffs_completed INTEGER NOT NULL,
                     pt_sold NUMERIC(12,2) NOT NULL,
+                    pack_1x_per_week INTEGER NOT NULL DEFAULT 0,
+                    pack_2x_per_week INTEGER NOT NULL DEFAULT 0,
+                    pack_8_flex INTEGER NOT NULL DEFAULT 0,
+                    pack_12_flex INTEGER NOT NULL DEFAULT 0,
+                    pack_24_flex INTEGER NOT NULL DEFAULT 0,
                     submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -195,6 +208,51 @@ def init_db():
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE submissions
+                ADD COLUMN IF NOT EXISTS pack_1x_per_week INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE submissions
+                ADD COLUMN IF NOT EXISTS pack_2x_per_week INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE submissions
+                ADD COLUMN IF NOT EXISTS pack_8_flex INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE submissions
+                ADD COLUMN IF NOT EXISTS pack_12_flex INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE submissions
+                ADD COLUMN IF NOT EXISTS pack_24_flex INTEGER NOT NULL DEFAULT 0
                 """
             )
         )
@@ -445,6 +503,11 @@ def add_submission(
     kickoffs_booked: int,
     kickoffs_completed: int,
     pt_sold: float,
+    pack_1x_per_week: int,
+    pack_2x_per_week: int,
+    pack_8_flex: int,
+    pack_12_flex: int,
+    pack_24_flex: int,
 ):
     engine = get_engine()
 
@@ -460,6 +523,11 @@ def add_submission(
                     kickoffs_booked,
                     kickoffs_completed,
                     pt_sold,
+                    pack_1x_per_week,
+                    pack_2x_per_week,
+                    pack_8_flex,
+                    pack_12_flex,
+                    pack_24_flex,
                     submitted_at
                 )
                 VALUES (
@@ -470,6 +538,11 @@ def add_submission(
                     :kickoffs_booked,
                     :kickoffs_completed,
                     :pt_sold,
+                    :pack_1x_per_week,
+                    :pack_2x_per_week,
+                    :pack_8_flex,
+                    :pack_12_flex,
+                    :pack_24_flex,
                     :submitted_at
                 )
                 """
@@ -482,6 +555,11 @@ def add_submission(
                 "kickoffs_booked": kickoffs_booked,
                 "kickoffs_completed": kickoffs_completed,
                 "pt_sold": pt_sold,
+                "pack_1x_per_week": pack_1x_per_week,
+                "pack_2x_per_week": pack_2x_per_week,
+                "pack_8_flex": pack_8_flex,
+                "pack_12_flex": pack_12_flex,
+                "pack_24_flex": pack_24_flex,
                 "submitted_at": datetime.now(),
             },
         )
@@ -512,7 +590,7 @@ def calculate_score(row: pd.Series, settings: Dict) -> Tuple[float, Dict[str, fl
         "Hours Score": metric_score(row["hours_worked"], settings["target_hours"], settings["weight_hours"]),
         "Booked Score": metric_score(row["kickoffs_booked"], settings["target_booked"], settings["weight_booked"]),
         "Completed Score": metric_score(row["kickoffs_completed"], settings["target_completed"], settings["weight_completed"]),
-        "PT Sold Score": metric_score(row["pt_sold"], settings["target_pt_sold"], settings["weight_pt_sold"]),
+        "Packs Sold Score": metric_score(row["pt_sold"], settings["target_pt_sold"], settings["weight_pt_sold"]),
     }
     total = round(sum(parts.values()), 2)
     return total, parts
@@ -541,11 +619,16 @@ def build_scored_df(df: pd.DataFrame, settings: Dict) -> pd.DataFrame:
             "kickoffs_booked",
             "kickoffs_completed",
             "pt_sold",
+            "pack_1x_per_week",
+            "pack_2x_per_week",
+            "pack_8_flex",
+            "pack_12_flex",
+            "pack_24_flex",
             "Trainer Score",
             "Hours Score",
             "Booked Score",
             "Completed Score",
-            "PT Sold Score",
+            "Packs Sold Score",
             "submitted_at",
         ]
     ]
@@ -712,7 +795,20 @@ def render_trainer_view(user: Dict):
                 kickoffs_booked = st.number_input("Kickoffs Booked", min_value=0, step=1)
             with col_b:
                 kickoffs_completed = st.number_input("Kickoffs Completed", min_value=0, step=1)
-                pt_sold = st.number_input("PT Sold ($)", min_value=0.0, step=50.0)
+                pack_1x_per_week = st.number_input("1x per Week Sold", min_value=0, step=1)
+                pack_2x_per_week = st.number_input("2x per Week Sold", min_value=0, step=1)
+                pack_8_flex = st.number_input("8 Flex Pack Sold", min_value=0, step=1)
+                pack_12_flex = st.number_input("12 Flex Pack Sold", min_value=0, step=1)
+                pack_24_flex = st.number_input("24 Flex Pack Sold", min_value=0, step=1)
+
+            total_packs_sold = (
+                int(pack_1x_per_week)
+                + int(pack_2x_per_week)
+                + int(pack_8_flex)
+                + int(pack_12_flex)
+                + int(pack_24_flex)
+            )
+            st.caption(f"Total Packs Sold: {total_packs_sold}")
 
             submit = st.form_submit_button("Submit Weekly Numbers", disabled=already_submitted)
 
@@ -730,7 +826,12 @@ def render_trainer_view(user: Dict):
                             hours_worked=float(hours_worked),
                             kickoffs_booked=int(kickoffs_booked),
                             kickoffs_completed=int(kickoffs_completed),
-                            pt_sold=float(pt_sold),
+                            pt_sold=float(total_packs_sold),
+                            pack_1x_per_week=int(pack_1x_per_week),
+                            pack_2x_per_week=int(pack_2x_per_week),
+                            pack_8_flex=int(pack_8_flex),
+                            pack_12_flex=int(pack_12_flex),
+                            pack_24_flex=int(pack_24_flex),
                         )
                         st.success("Weekly submission saved.")
                         st.rerun()
@@ -793,7 +894,7 @@ def render_director_dashboard(user: Dict):
             c1.metric("Total Submissions", len(filtered))
             c2.metric("Avg Trainer Score", round(filtered["Trainer Score"].mean(), 2))
             c3.metric("Kickoffs Completed", int(filtered["kickoffs_completed"].sum()))
-            c4.metric("PT Sold", f"${filtered['pt_sold'].sum():,.2f}")
+            c4.metric("Packs Sold", int(filtered["pt_sold"].sum()))
 
             st.write("### Trainer Leaderboard")
             leaderboard = filtered.sort_values(by="Trainer Score", ascending=False).reset_index(drop=True)
@@ -807,6 +908,11 @@ def render_director_dashboard(user: Dict):
                         "kickoffs_booked",
                         "kickoffs_completed",
                         "pt_sold",
+                        "pack_1x_per_week",
+                        "pack_2x_per_week",
+                        "pack_8_flex",
+                        "pack_12_flex",
+                        "pack_24_flex",
                         "Trainer Score",
                     ]
                 ],
@@ -821,7 +927,7 @@ def render_director_dashboard(user: Dict):
                     total_hours=("hours_worked", "sum"),
                     total_booked=("kickoffs_booked", "sum"),
                     total_completed=("kickoffs_completed", "sum"),
-                    total_pt_sold=("pt_sold", "sum"),
+                    total_packs_sold=("pt_sold", "sum"),
                     avg_score=("Trainer Score", "mean"),
                 )
                 .sort_values(by="avg_score", ascending=False)
@@ -864,7 +970,7 @@ def render_director_dashboard(user: Dict):
                     step=1,
                 )
                 target_pt_sold = st.number_input(
-                    "Target PT Sold ($)",
+                    "Target Packs Sold",
                     min_value=0.0,
                     value=float(settings["target_pt_sold"]),
                     step=50.0,
@@ -889,7 +995,7 @@ def render_director_dashboard(user: Dict):
                     step=1.0,
                 )
                 weight_pt_sold = st.number_input(
-                    "Weight: PT Sold",
+                    "Weight: Packs Sold",
                     min_value=0.0,
                     value=float(settings["weight_pt_sold"]),
                     step=1.0,
@@ -1008,6 +1114,11 @@ def render_director_dashboard(user: Dict):
                     "kickoffs_booked",
                     "kickoffs_completed",
                     "pt_sold",
+                    "pack_1x_per_week",
+                    "pack_2x_per_week",
+                    "pack_8_flex",
+                    "pack_12_flex",
+                    "pack_24_flex",
                     "submitted_at",
                 ]
             ].to_csv(index=False).encode("utf-8")
