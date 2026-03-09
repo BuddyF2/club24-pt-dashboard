@@ -774,11 +774,20 @@ def render_director_dashboard(user: Dict):
             clubs = ["All"] + CLUBS
             selected_club = st.selectbox("Filter by Club", clubs)
 
+            trainer_source = scored_df.copy()
+            if selected_club != "All":
+                trainer_source = trainer_source[trainer_source["club"] == selected_club]
+
+            trainers = ["All"] + sorted(trainer_source["trainer_name"].astype(str).unique().tolist())
+            selected_trainer = st.selectbox("Filter by Trainer", trainers)
+
             filtered = scored_df.copy()
             if selected_week != "All":
                 filtered = filtered[filtered["week_start"].astype(str) == selected_week]
             if selected_club != "All":
                 filtered = filtered[filtered["club"] == selected_club]
+            if selected_trainer != "All":
+                filtered = filtered[filtered["trainer_name"] == selected_trainer]
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Submissions", len(filtered))
