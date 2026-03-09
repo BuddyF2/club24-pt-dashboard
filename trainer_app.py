@@ -6,6 +6,7 @@
 # Only directors can create trainer logins.
 # Trainers are locked to one submission per week.
 # Users can change their own password.
+# Directors can upload documents for trainers to view and download.
 
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -48,6 +49,21 @@ DIRECTOR_EMAILS = {
     "club24chase@gmail.com",
     "feedsatwork@gmail.com",
     "johnny.saumell@gmail.com",
+}
+
+ALLOWED_DOCUMENT_TYPES = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "csv": "text/csv",
+    "txt": "text/plain",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
 }
 
 DEFAULT_SCORING = {
@@ -217,6 +233,27 @@ def init_db():
         conn.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS trainer_documents (
+                    id SERIAL PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    original_filename VARCHAR(255) NOT NULL,
+                    file_ext VARCHAR(20) NOT NULL,
+                    mime_type VARCHAR(255) NOT NULL,
+                    file_data BYTEA NOT NULL,
+                    file_size_bytes INTEGER NOT NULL,
+                    club_scope VARCHAR(50) NOT NULL DEFAULT 'All Clubs',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    uploaded_by_email VARCHAR(255) NOT NULL,
+                    uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
                 ALTER TABLE submissions
                 ADD COLUMN IF NOT EXISTS pack_1x_per_week INTEGER NOT NULL DEFAULT 0
                 """
@@ -351,6 +388,130 @@ def get_all_user_accounts() -> pd.DataFrame:
         """,
         engine,
     )
+
+
+def add_trainer_document(
+    title: str,
+    original_filename: str,
+    file_ext: str,
+    mime_type: str,
+    file_bytes: bytes,
+    club_scope: str,
+    uploaded_by_email: str,
+):
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO trainer_documents (
+                    title,
+                    original_filename,
+                    file_ext,
+                    mime_type,
+                    file_data,
+                    file_size_bytes,
+                    club_scope,
+                    is_active,
+                    uploaded_by_email,
+                    uploaded_at,
+                    updated_at
+                )
+                VALUES (
+                    :title,
+                    :original_filename,
+                    :file_ext,
+                    :mime_type,
+                    :file_data,
+                    :file_size_bytes,
+                    :club_scope,
+                    TRUE,
+                    :uploaded_by_email,
+                    :uploaded_at,
+                    :updated_at
+                )
+                """
+            ),
+            {
+                "title": title.strip(),
+                "original_filename": original_filename.strip(),
+                "file_ext": file_ext.strip().lower(),
+                "mime_type": mime_type.strip(),
+                "file_data": file_bytes,
+                "file_size_bytes": len(file_bytes),
+                "club_scope": club_scope,
+                "uploaded_by_email": uploaded_by_email.strip().lower(),
+                "uploaded_at": datetime.now(EST),
+                "updated_at": datetime.now(EST),
+            },
+        )
+
+
+def get_trainer_documents(club: Optional[str] = None) -> pd.DataFrame:
+    engine = get_engine()
+    if club and club != "All Clubs":
+        return pd.read_sql(
+            text(
+                """
+                SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
+                       club_scope, uploaded_by_email, uploaded_at, updated_at
+                FROM trainer_documents
+                WHERE is_active = TRUE
+                  AND (club_scope = 'All Clubs' OR club_scope = :club_scope)
+                ORDER BY uploaded_at DESC, title ASC
+                """
+            ),
+            engine,
+            params={"club_scope": club},
+        )
+    return pd.read_sql(
+        """
+        SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
+               club_scope, uploaded_by_email, uploaded_at, updated_at
+        FROM trainer_documents
+        WHERE is_active = TRUE
+        ORDER BY uploaded_at DESC, title ASC
+        """,
+        engine,
+    )
+
+
+def get_trainer_document_file(document_id: int) -> Optional[Dict]:
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT id, title, original_filename, file_ext, mime_type, file_data, file_size_bytes,
+                       club_scope, uploaded_by_email, uploaded_at, updated_at
+                FROM trainer_documents
+                WHERE id = :document_id AND is_active = TRUE
+                LIMIT 1
+                """
+            ),
+            {"document_id": int(document_id)},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def deactivate_trainer_document(document_id: int):
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE trainer_documents
+                SET is_active = FALSE,
+                    updated_at = :updated_at
+                WHERE id = :document_id
+                """
+            ),
+            {
+                "document_id": int(document_id),
+                "updated_at": datetime.now(EST),
+            },
+        )
 
 
 
@@ -731,6 +892,15 @@ def require_login() -> Dict:
 # -------------------------------------------------
 # UI SECTIONS
 # -------------------------------------------------
+def format_file_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def render_change_password_tab(user: Dict):
     st.write("### Change Password")
     st.caption("Use this to update your own login password.")
@@ -775,11 +945,49 @@ def get_current_week_start() -> date:
     return today_est - timedelta(days=today_est.weekday())
 
 
+def render_trainer_documents_tab(user: Dict):
+    st.subheader("Trainer Documents")
+    st.write("Documents uploaded by the PT director appear here.")
+
+    try:
+        docs = get_trainer_documents(user["club"])
+    except SQLAlchemyError as e:
+        st.error(f"Could not load documents: {e}")
+        return
+
+    if docs.empty:
+        st.info("No documents available right now.")
+        return
+
+    docs = docs.copy()
+    docs["size"] = docs["file_size_bytes"].apply(format_file_size)
+    st.dataframe(
+        docs[["title", "original_filename", "file_ext", "club_scope", "size", "uploaded_at"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    selected_doc_id = st.selectbox(
+        "Select a document to download",
+        options=docs["id"].tolist(),
+        format_func=lambda doc_id: f"{docs.loc[docs['id'] == doc_id, 'title'].iloc[0]} ({docs.loc[docs['id'] == doc_id, 'original_filename'].iloc[0]})",
+    )
+
+    doc_record = get_trainer_document_file(int(selected_doc_id))
+    if doc_record:
+        st.download_button(
+            label=f"Download {doc_record['title']}",
+            data=bytes(doc_record["file_data"]),
+            file_name=doc_record["original_filename"],
+            mime=doc_record["mime_type"],
+        )
+
+
 def render_trainer_view(user: Dict):
     trainer_name = user["full_name"]
     club = user["club"]
 
-    tab1, tab2 = st.tabs(["Weekly Submission", "Change Password"])
+    tab1, tab2, tab3 = st.tabs(["Weekly Submission", "Trainer Documents", "Change Password"])
 
     with tab1:
         st.subheader("Weekly Trainer Submission")
@@ -854,6 +1062,9 @@ def render_trainer_view(user: Dict):
         st.caption("Trainer score stays hidden from trainers.")
 
     with tab2:
+        render_trainer_documents_tab(user)
+
+    with tab3:
         render_change_password_tab(user)
 
 
@@ -861,8 +1072,8 @@ def render_trainer_view(user: Dict):
 def render_director_dashboard(user: Dict):
     st.subheader("PT Director Dashboard")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["Dashboard", "Scoring Setup", "User Logins", "Change Password", "Exports"]
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Dashboard", "Scoring Setup", "User Logins", "Trainer Documents", "Change Password", "Exports"]
     )
 
     with tab1:
@@ -1095,9 +1306,87 @@ def render_director_dashboard(user: Dict):
         )
 
     with tab4:
-        render_change_password_tab(user)
+        st.write("### Upload Trainer Documents")
+        st.caption("Upload files for all clubs or a specific club. Trainers can download approved files from their portal.")
+
+        with st.form("upload_documents_form"):
+            document_scope = st.selectbox("Document Visibility", ["All Clubs"] + CLUBS)
+            uploaded_files = st.file_uploader(
+                "Upload Documents",
+                type=list(ALLOWED_DOCUMENT_TYPES.keys()),
+                accept_multiple_files=True,
+                help="Accepted file types: PDF, Word, Excel, PowerPoint, CSV, TXT, PNG, JPG, JPEG.",
+            )
+            upload_submit = st.form_submit_button("Upload Documents")
+
+            if upload_submit:
+                if not uploaded_files:
+                    st.error("Please choose at least one file to upload.")
+                else:
+                    upload_count = 0
+                    for uploaded_file in uploaded_files:
+                        filename = uploaded_file.name or "document"
+                        file_ext = filename.split(".")[-1].lower() if "." in filename else ""
+                        mime_type = uploaded_file.type or ALLOWED_DOCUMENT_TYPES.get(file_ext, "application/octet-stream")
+                        if file_ext not in ALLOWED_DOCUMENT_TYPES:
+                            st.error(f"{filename} is not an allowed file type.")
+                            continue
+                        file_bytes = uploaded_file.getvalue()
+                        if not file_bytes:
+                            st.error(f"{filename} is empty and was skipped.")
+                            continue
+                        title = filename.rsplit(".", 1)[0]
+                        try:
+                            add_trainer_document(
+                                title=title,
+                                original_filename=filename,
+                                file_ext=file_ext,
+                                mime_type=mime_type,
+                                file_bytes=file_bytes,
+                                club_scope=document_scope,
+                                uploaded_by_email=user["email"],
+                            )
+                            upload_count += 1
+                        except SQLAlchemyError as e:
+                            st.error(f"Could not upload {filename}: {e}")
+                    if upload_count:
+                        st.success(f"Uploaded {upload_count} document(s).")
+                        st.rerun()
+
+        st.write("### Active Documents")
+        try:
+            docs = get_trainer_documents()
+            if docs.empty:
+                st.info("No active documents uploaded yet.")
+            else:
+                docs_display = docs.copy()
+                docs_display["size"] = docs_display["file_size_bytes"].apply(format_file_size)
+                st.dataframe(
+                    docs_display[["id", "title", "original_filename", "file_ext", "club_scope", "size", "uploaded_by_email", "uploaded_at"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                disable_doc_id = st.selectbox(
+                    "Select Document to Remove",
+                    options=docs_display["id"].tolist(),
+                    format_func=lambda doc_id: f"{docs_display.loc[docs_display['id'] == doc_id, 'title'].iloc[0]} ({docs_display.loc[docs_display['id'] == doc_id, 'club_scope'].iloc[0]})",
+                    key="disable_document_id",
+                )
+                if st.button("Remove Selected Document"):
+                    try:
+                        deactivate_trainer_document(int(disable_doc_id))
+                        st.success("Document removed.")
+                        st.rerun()
+                    except SQLAlchemyError as e:
+                        st.error(f"Could not remove document: {e}")
+        except SQLAlchemyError as e:
+            st.error(f"Could not load documents: {e}")
 
     with tab5:
+        render_change_password_tab(user)
+
+    with tab6:
         try:
             df = get_submissions()
             settings = get_settings()
