@@ -7,11 +7,14 @@
 # Trainers are locked to one submission per week.
 # Users can change their own password.
 # Directors can upload documents for trainers to view and download.
+# Supported in-app previews: PDF, PNG/JPG/JPEG, TXT, CSV, XLS, XLSX.
 
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
+import base64
 import hashlib
 import hmac
+import io
 import os
 import secrets
 from typing import Dict, Tuple, Optional
@@ -70,20 +73,12 @@ DEFAULT_SCORING = {
     "target_hours": 25,
     "target_booked": 8,
     "target_completed": 6,
-    "target_pt_sold": 20,
+    "target_pt_sold": 20,  # total packs sold target
     "weight_hours": 20,
     "weight_booked": 25,
     "weight_completed": 25,
     "weight_pt_sold": 30,
 }
-
-PACK_TYPES = [
-    "1x per Week",
-    "2x per Week",
-    "8 Flex Pack",
-    "12 Flex Pack",
-    "24 Flex Pack",
-]
 
 PBKDF2_ITERATIONS = 200_000
 EST = ZoneInfo("America/New_York")
@@ -102,7 +97,6 @@ def get_database_url() -> str:
             database_url = ""
 
     return database_url.strip()
-
 
 
 def get_director_master_password() -> str:
@@ -135,7 +129,6 @@ def hash_password(password: str) -> str:
     return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${derived_key.hex()}"
 
 
-
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
         algorithm, iterations, salt, stored_key = stored_hash.split("$")
@@ -163,7 +156,6 @@ def get_engine():
             "DATABASE_URL is not set. Add it as an environment variable or Streamlit secret."
         )
     return create_engine(DATABASE_URL, pool_pre_ping=True)
-
 
 
 def init_db():
@@ -251,6 +243,7 @@ def init_db():
             )
         )
 
+        # Add pack columns for existing databases safely
         conn.execute(
             text(
                 """
@@ -346,7 +339,6 @@ def init_db():
             )
 
 
-
 def get_settings() -> Dict:
     engine = get_engine()
     df = pd.read_sql("SELECT * FROM scoring_settings WHERE id = 1", engine)
@@ -355,7 +347,6 @@ def get_settings() -> Dict:
         raise ValueError("Scoring settings not found.")
 
     return df.iloc[0].to_dict()
-
 
 
 def get_user_account(email: str) -> Optional[Dict]:
@@ -375,7 +366,6 @@ def get_user_account(email: str) -> Optional[Dict]:
         ).mappings().first()
 
     return dict(row) if row else None
-
 
 
 def get_all_user_accounts() -> pd.DataFrame:
@@ -450,21 +440,23 @@ def add_trainer_document(
 
 def get_trainer_documents(club: Optional[str] = None) -> pd.DataFrame:
     engine = get_engine()
+
     if club and club != "All Clubs":
-        return pd.read_sql(
-            text(
-                """
-                SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
-                       club_scope, uploaded_by_email, uploaded_at, updated_at
-                FROM trainer_documents
-                WHERE is_active = TRUE
-                  AND (club_scope = 'All Clubs' OR club_scope = :club_scope)
-                ORDER BY uploaded_at DESC, title ASC
-                """
-            ),
-            engine,
-            params={"club_scope": club},
+        query = text(
+            """
+            SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
+                   club_scope, uploaded_by_email, uploaded_at, updated_at
+            FROM trainer_documents
+            WHERE is_active = TRUE
+              AND (club_scope = 'All Clubs' OR club_scope = :club_scope)
+            ORDER BY uploaded_at DESC, title ASC
+            """
         )
+        with engine.begin() as conn:
+            result = conn.execute(query, {"club_scope": club})
+            rows = result.mappings().all()
+        return pd.DataFrame(rows)
+
     return pd.read_sql(
         """
         SELECT id, title, original_filename, file_ext, mime_type, file_size_bytes,
@@ -514,7 +506,6 @@ def deactivate_trainer_document(document_id: int):
         )
 
 
-
 def upsert_trainer_account(email: str, full_name: str, club: str, password: str):
     engine = get_engine()
     password_hash = hash_password(password)
@@ -544,7 +535,6 @@ def upsert_trainer_account(email: str, full_name: str, club: str, password: str)
         )
 
 
-
 def deactivate_user_account(email: str):
     engine = get_engine()
 
@@ -563,7 +553,6 @@ def deactivate_user_account(email: str):
                 "updated_at": datetime.now(EST),
             },
         )
-
 
 
 def update_user_password(email: str, new_password: str):
@@ -588,7 +577,6 @@ def update_user_password(email: str, new_password: str):
         )
 
 
-
 def has_submission_for_week(week_start: date, trainer_name: str, club: str) -> bool:
     engine = get_engine()
 
@@ -611,7 +599,6 @@ def has_submission_for_week(week_start: date, trainer_name: str, club: str) -> b
         ).scalar()
 
     return int(existing or 0) > 0
-
 
 
 def update_settings(
@@ -655,7 +642,6 @@ def update_settings(
                 "updated_at": datetime.now(EST),
             },
         )
-
 
 
 def add_submission(
@@ -728,7 +714,6 @@ def add_submission(
         )
 
 
-
 def get_submissions() -> pd.DataFrame:
     engine = get_engine()
     return pd.read_sql(
@@ -747,7 +732,6 @@ def metric_score(actual: float, target: float, weight: float) -> float:
     return round(ratio * float(weight), 2)
 
 
-
 def calculate_score(row: pd.Series, settings: Dict) -> Tuple[float, Dict[str, float]]:
     parts = {
         "Hours Score": metric_score(row["hours_worked"], settings["target_hours"], settings["weight_hours"]),
@@ -757,7 +741,6 @@ def calculate_score(row: pd.Series, settings: Dict) -> Tuple[float, Dict[str, fl
     }
     total = round(sum(parts.values()), 2)
     return total, parts
-
 
 
 def build_scored_df(df: pd.DataFrame, settings: Dict) -> pd.DataFrame:
@@ -804,10 +787,8 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-
 def is_director_email(email: str) -> bool:
     return normalize_email(email) in DIRECTOR_EMAILS
-
 
 
 def authenticate_user(email: str, password: str) -> Optional[Dict]:
@@ -842,7 +823,6 @@ def authenticate_user(email: str, password: str) -> Optional[Dict]:
     return None
 
 
-
 def show_login_screen():
     st.title("Club 24 PT Score Dashboard")
     st.caption("Better Clubs. Better Price. Always Open.")
@@ -869,7 +849,6 @@ def show_login_screen():
     st.stop()
 
 
-
 def require_login() -> Dict:
     if "auth_user" not in st.session_state:
         show_login_screen()
@@ -890,7 +869,7 @@ def require_login() -> Dict:
 
 
 # -------------------------------------------------
-# UI SECTIONS
+# UI HELPERS
 # -------------------------------------------------
 def format_file_size(num_bytes: int) -> str:
     size = float(num_bytes)
@@ -901,6 +880,62 @@ def format_file_size(num_bytes: int) -> str:
     return f"{size:.1f} GB"
 
 
+def get_current_week_start() -> date:
+    today_est = datetime.now(EST).date()
+    return today_est - timedelta(days=today_est.weekday())
+
+
+def preview_document(doc_record: Dict):
+    file_bytes = bytes(doc_record["file_data"])
+    file_ext = str(doc_record["file_ext"]).lower()
+    mime_type = doc_record["mime_type"]
+
+    st.write(f"### Preview: {doc_record['title']}")
+
+    try:
+        if file_ext == "pdf":
+            pdf_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            pdf_display = f"""
+                <iframe
+                    src="data:application/pdf;base64,{pdf_base64}"
+                    width="100%"
+                    height="800"
+                    type="application/pdf">
+                </iframe>
+            """
+            st.markdown(pdf_display, unsafe_allow_html=True)
+
+        elif file_ext in ["png", "jpg", "jpeg"]:
+            st.image(file_bytes, use_container_width=True)
+
+        elif file_ext == "txt":
+            text_content = file_bytes.decode("utf-8", errors="ignore")
+            st.text_area("Text Preview", text_content, height=400, disabled=True)
+
+        elif file_ext == "csv":
+            df_preview = pd.read_csv(io.BytesIO(file_bytes))
+            st.dataframe(df_preview, use_container_width=True)
+
+        elif file_ext in ["xlsx", "xls"]:
+            df_preview = pd.read_excel(io.BytesIO(file_bytes))
+            st.dataframe(df_preview, use_container_width=True)
+
+        else:
+            st.info("Preview not available for this file type. Download the file to view it.")
+    except Exception as e:
+        st.warning(f"Preview could not be generated for this file: {e}")
+
+    st.download_button(
+        label=f"Download {doc_record['title']}",
+        data=file_bytes,
+        file_name=doc_record["original_filename"],
+        mime=mime_type,
+    )
+
+
+# -------------------------------------------------
+# UI SECTIONS
+# -------------------------------------------------
 def render_change_password_tab(user: Dict):
     st.write("### Change Password")
     st.caption("Use this to update your own login password.")
@@ -939,12 +974,6 @@ def render_change_password_tab(user: Dict):
                         st.error(f"Could not update password: {e}")
 
 
-
-def get_current_week_start() -> date:
-    today_est = datetime.now(EST).date()
-    return today_est - timedelta(days=today_est.weekday())
-
-
 def render_trainer_documents_tab(user: Dict):
     st.subheader("Trainer Documents")
     st.write("Documents uploaded by the PT director appear here.")
@@ -961,6 +990,7 @@ def render_trainer_documents_tab(user: Dict):
 
     docs = docs.copy()
     docs["size"] = docs["file_size_bytes"].apply(format_file_size)
+
     st.dataframe(
         docs[["title", "original_filename", "file_ext", "club_scope", "size", "uploaded_at"]],
         use_container_width=True,
@@ -968,19 +998,14 @@ def render_trainer_documents_tab(user: Dict):
     )
 
     selected_doc_id = st.selectbox(
-        "Select a document to download",
+        "Select a document to view",
         options=docs["id"].tolist(),
         format_func=lambda doc_id: f"{docs.loc[docs['id'] == doc_id, 'title'].iloc[0]} ({docs.loc[docs['id'] == doc_id, 'original_filename'].iloc[0]})",
     )
 
     doc_record = get_trainer_document_file(int(selected_doc_id))
     if doc_record:
-        st.download_button(
-            label=f"Download {doc_record['title']}",
-            data=bytes(doc_record["file_data"]),
-            file_name=doc_record["original_filename"],
-            mime=doc_record["mime_type"],
-        )
+        preview_document(doc_record)
 
 
 def render_trainer_view(user: Dict):
@@ -997,10 +1022,13 @@ def render_trainer_view(user: Dict):
         col1.text_input("Trainer Name", value=trainer_name, disabled=True)
         col2.text_input("Club", value=club, disabled=True)
 
+        reporting_week = get_current_week_start()
+        st.caption(f"Reporting Week: {reporting_week.strftime('%A, %B %d, %Y')}")
+
         with st.form("trainer_form", clear_on_submit=True):
             week_start = st.date_input(
                 "Week Starting",
-                value=get_current_week_start(),
+                value=reporting_week,
                 disabled=True,
                 help="Week Starting is locked to the current Monday for all trainers.",
             )
@@ -1013,8 +1041,9 @@ def render_trainer_view(user: Dict):
             with col_a:
                 hours_worked = st.number_input("Hours Worked", min_value=0.0, step=0.5)
                 kickoffs_booked = st.number_input("Kickoffs Booked", min_value=0, step=1)
-            with col_b:
                 kickoffs_completed = st.number_input("Kickoffs Completed", min_value=0, step=1)
+
+            with col_b:
                 pack_1x_per_week = st.number_input("1x per Week Sold", min_value=0, step=1)
                 pack_2x_per_week = st.number_input("2x per Week Sold", min_value=0, step=1)
                 pack_8_flex = st.number_input("8 Flex Pack Sold", min_value=0, step=1)
@@ -1068,7 +1097,6 @@ def render_trainer_view(user: Dict):
         render_change_password_tab(user)
 
 
-
 def render_director_dashboard(user: Dict):
     st.subheader("PT Director Dashboard")
 
@@ -1115,9 +1143,9 @@ def render_director_dashboard(user: Dict):
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Submissions", len(filtered))
-            c2.metric("Avg Trainer Score", round(filtered["Trainer Score"].mean(), 2))
-            c3.metric("Kickoffs Completed", int(filtered["kickoffs_completed"].sum()))
-            c4.metric("Packs Sold", int(filtered["pt_sold"].sum()))
+            c2.metric("Avg Trainer Score", round(filtered["Trainer Score"].mean(), 2) if not filtered.empty else 0)
+            c3.metric("Kickoffs Completed", int(filtered["kickoffs_completed"].sum()) if not filtered.empty else 0)
+            c4.metric("Packs Sold", int(filtered["pt_sold"].sum()) if not filtered.empty else 0)
 
             st.write("### Trainer Leaderboard")
             leaderboard = filtered.sort_values(by="Trainer Score", ascending=False).reset_index(drop=True)
@@ -1196,7 +1224,7 @@ def render_director_dashboard(user: Dict):
                     "Target Packs Sold",
                     min_value=0.0,
                     value=float(settings["target_pt_sold"]),
-                    step=50.0,
+                    step=1.0,
                 )
             with col2:
                 weight_hours = st.number_input(
@@ -1307,7 +1335,7 @@ def render_director_dashboard(user: Dict):
 
     with tab4:
         st.write("### Upload Trainer Documents")
-        st.caption("Upload files for all clubs or a specific club. Trainers can download approved files from their portal.")
+        st.caption("Upload files for all clubs or a specific club. Trainers can view and download approved files from their portal.")
 
         with st.form("upload_documents_form"):
             document_scope = st.selectbox("Document Visibility", ["All Clubs"] + CLUBS)
@@ -1328,14 +1356,18 @@ def render_director_dashboard(user: Dict):
                         filename = uploaded_file.name or "document"
                         file_ext = filename.split(".")[-1].lower() if "." in filename else ""
                         mime_type = uploaded_file.type or ALLOWED_DOCUMENT_TYPES.get(file_ext, "application/octet-stream")
+
                         if file_ext not in ALLOWED_DOCUMENT_TYPES:
                             st.error(f"{filename} is not an allowed file type.")
                             continue
+
                         file_bytes = uploaded_file.getvalue()
                         if not file_bytes:
                             st.error(f"{filename} is empty and was skipped.")
                             continue
+
                         title = filename.rsplit(".", 1)[0]
+
                         try:
                             add_trainer_document(
                                 title=title,
@@ -1349,6 +1381,7 @@ def render_director_dashboard(user: Dict):
                             upload_count += 1
                         except SQLAlchemyError as e:
                             st.error(f"Could not upload {filename}: {e}")
+
                     if upload_count:
                         st.success(f"Uploaded {upload_count} document(s).")
                         st.rerun()
@@ -1373,6 +1406,11 @@ def render_director_dashboard(user: Dict):
                     format_func=lambda doc_id: f"{docs_display.loc[docs_display['id'] == doc_id, 'title'].iloc[0]} ({docs_display.loc[docs_display['id'] == doc_id, 'club_scope'].iloc[0]})",
                     key="disable_document_id",
                 )
+
+                doc_record = get_trainer_document_file(int(disable_doc_id))
+                if doc_record:
+                    preview_document(doc_record)
+
                 if st.button("Remove Selected Document"):
                     try:
                         deactivate_trainer_document(int(disable_doc_id))
@@ -1423,6 +1461,7 @@ def render_director_dashboard(user: Dict):
                     "submitted_at",
                 ]
             ].to_csv(index=False).encode("utf-8")
+
             st.download_button(
                 "Download Trainer Input CSV",
                 data=trainer_csv,
