@@ -7,7 +7,8 @@
 # Trainers are locked to one submission per week.
 # Users can change their own password.
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import hmac
 import os
@@ -69,6 +70,7 @@ PACK_TYPES = [
 ]
 
 PBKDF2_ITERATIONS = 200_000
+EST = ZoneInfo("America/New_York")
 
 
 # -------------------------------------------------
@@ -302,7 +304,7 @@ def init_db():
                 ),
                 {
                     **DEFAULT_SCORING,
-                    "updated_at": datetime.now(),
+                    "updated_at": datetime.now(EST),
                 },
             )
 
@@ -376,7 +378,7 @@ def upsert_trainer_account(email: str, full_name: str, club: str, password: str)
                 "full_name": full_name.strip(),
                 "club": club,
                 "password_hash": password_hash,
-                "updated_at": datetime.now(),
+                "updated_at": datetime.now(EST),
             },
         )
 
@@ -397,7 +399,7 @@ def deactivate_user_account(email: str):
             ),
             {
                 "email": email.strip().lower(),
-                "updated_at": datetime.now(),
+                "updated_at": datetime.now(EST),
             },
         )
 
@@ -420,7 +422,7 @@ def update_user_password(email: str, new_password: str):
             {
                 "email": email.strip().lower(),
                 "password_hash": password_hash,
-                "updated_at": datetime.now(),
+                "updated_at": datetime.now(EST),
             },
         )
 
@@ -489,7 +491,7 @@ def update_settings(
                 "weight_booked": weight_booked,
                 "weight_completed": weight_completed,
                 "weight_pt_sold": weight_pt_sold,
-                "updated_at": datetime.now(),
+                "updated_at": datetime.now(EST),
             },
         )
 
@@ -560,7 +562,7 @@ def add_submission(
                 "pack_8_flex": pack_8_flex,
                 "pack_12_flex": pack_12_flex,
                 "pack_24_flex": pack_24_flex,
-                "submitted_at": datetime.now(),
+                "submitted_at": datetime.now(EST),
             },
         )
 
@@ -768,6 +770,11 @@ def render_change_password_tab(user: Dict):
 
 
 
+def get_current_week_start() -> date:
+    today_est = datetime.now(EST).date()
+    return today_est - timedelta(days=today_est.weekday())
+
+
 def render_trainer_view(user: Dict):
     trainer_name = user["full_name"]
     club = user["club"]
@@ -783,7 +790,12 @@ def render_trainer_view(user: Dict):
         col2.text_input("Club", value=club, disabled=True)
 
         with st.form("trainer_form", clear_on_submit=True):
-            week_start = st.date_input("Week Starting", value=date.today())
+            week_start = st.date_input(
+                "Week Starting",
+                value=get_current_week_start(),
+                disabled=True,
+                help="Week Starting is locked to the current Monday for all trainers.",
+            )
 
             already_submitted = has_submission_for_week(week_start, trainer_name, club)
             if already_submitted:
