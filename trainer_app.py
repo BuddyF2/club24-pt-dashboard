@@ -1594,21 +1594,42 @@ def preview_document(doc_record: Dict):
     file_bytes = bytes(doc_record["file_data"])
     file_ext = str(doc_record["file_ext"]).lower()
     mime_type = doc_record["mime_type"]
+
     st.write(f"### Preview: {doc_record['title']}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label=f"Download {doc_record['title']}",
+            data=file_bytes,
+            file_name=doc_record["original_filename"],
+            mime=mime_type,
+            use_container_width=True,
+        )
+    with col2:
+        st.download_button(
+            label="Open Full Screen",
+            data=file_bytes,
+            file_name=doc_record["original_filename"],
+            mime=mime_type,
+            use_container_width=True,
+        )
+
     try:
         if file_ext == "pdf":
-            pdf_base64 = base64.b64encode(file_bytes).decode("utf-8")
-            st.markdown(
-                f"""
-                <iframe
-                    src=\"data:application/pdf;base64,{pdf_base64}\"
-                    width=\"100%\"
-                    height=\"800\"
-                    type=\"application/pdf\">
-                </iframe>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.divider()
+            st.write("### PDF Preview")
+            try:
+                st.pdf(file_bytes)
+            except Exception:
+                pdf_display = f"""
+                    <embed
+                        src=\"data:application/pdf;base64,{base64.b64encode(file_bytes).decode('utf-8')}\"
+                        width=\"100%\"
+                        height=\"800\"
+                        type=\"application/pdf\">
+                """
+                st.markdown(pdf_display, unsafe_allow_html=True)
         elif file_ext in ["png", "jpg", "jpeg"]:
             st.image(file_bytes, use_container_width=True)
         elif file_ext == "txt":
@@ -1618,15 +1639,9 @@ def preview_document(doc_record: Dict):
         elif file_ext in ["xlsx", "xls"]:
             st.dataframe(pd.read_excel(io.BytesIO(file_bytes)), use_container_width=True)
         else:
-            st.info("Preview not available for this file type. Download the file to view it.")
+            st.info("Preview not available for this file type. Use the buttons above to open or download it.")
     except Exception as e:
         st.warning(f"Preview could not be generated for this file: {e}")
-    st.download_button(
-        label=f"Download {doc_record['title']}",
-        data=file_bytes,
-        file_name=doc_record["original_filename"],
-        mime=mime_type,
-    )
 
 
 def filter_by_week_club_trainer(scored_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
