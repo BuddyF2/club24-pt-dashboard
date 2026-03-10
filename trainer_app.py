@@ -19,6 +19,7 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
+import fitz
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -1619,27 +1620,56 @@ def preview_document(doc_record: Dict):
         if file_ext == "pdf":
             st.divider()
             st.write("### PDF Preview")
-            try:
-                st.pdf(file_bytes)
-            except Exception:
-                pdf_display = f"""
-                    <embed
-                        src=\"data:application/pdf;base64,{base64.b64encode(file_bytes).decode('utf-8')}\"
-                        width=\"100%\"
-                        height=\"800\"
-                        type=\"application/pdf\">
-                """
-                st.markdown(pdf_display, unsafe_allow_html=True)
+
+            pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+
+            if pdf_doc.page_count == 0:
+                st.info("This PDF has no pages.")
+                return
+
+            page_limit = st.number_input(
+                "Pages to preview",
+                min_value=1,
+                max_value=pdf_doc.page_count,
+                value=min(5, pdf_doc.page_count),
+                step=1,
+                key=f"pdf_page_limit_{doc_record['id']}",
+            )
+
+            zoom = 1.5
+            matrix = fitz.Matrix(zoom, zoom)
+
+            for page_num in range(page_limit):
+                page = pdf_doc.load_page(page_num)
+                pix = page.get_pixmap(matrix=matrix)
+                img_bytes = pix.tobytes("png")
+
+                st.write(f"Page {page_num + 1}")
+                st.image(img_bytes, use_container_width=True)
+
+            if pdf_doc.page_count > page_limit:
+                st.info(f"Showing first {page_limit} pages out of {pdf_doc.page_count} total pages.")
+
         elif file_ext in ["png", "jpg", "jpeg"]:
             st.image(file_bytes, use_container_width=True)
+
         elif file_ext == "txt":
-            st.text_area("Text Preview", file_bytes.decode("utf-8", errors="ignore"), height=400, disabled=True)
+            st.text_area(
+                "Text Preview",
+                file_bytes.decode("utf-8", errors="ignore"),
+                height=400,
+                disabled=True,
+            )
+
         elif file_ext == "csv":
             st.dataframe(pd.read_csv(io.BytesIO(file_bytes)), use_container_width=True)
+
         elif file_ext in ["xlsx", "xls"]:
             st.dataframe(pd.read_excel(io.BytesIO(file_bytes)), use_container_width=True)
+
         else:
             st.info("Preview not available for this file type. Use the buttons above to open or download it.")
+
     except Exception as e:
         st.warning(f"Preview could not be generated for this file: {e}")
 
