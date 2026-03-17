@@ -20,8 +20,7 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
-from abc_calendar_sync import fetch_calendar_events
-
+from abc_calendar_sync import fetch_calendar_events, ABC_CLUBS
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -2166,18 +2165,34 @@ def render_dashboard_tab(user: Dict):
 def render_master_calendar_tab():
     st.write("### Master Calendar")
 
-    col1, col2 = st.columns(2)
+    st.write("### ABC Calendar Sync")
+
+    col1, col2 = st.columns([2, 1])
+
     with col1:
-        if st.button("Sync ABC Calendar for Ridgefield", use_container_width=True):
+        selected_abc_club = st.selectbox(
+            "Select ABC Club to Sync",
+            list(ABC_CLUBS.keys()),
+            key="abc_sync_club",
+        )
+
+    with col2:
+        st.caption("ABC Club Numbers")
+        st.write(ABC_CLUBS[selected_abc_club])
+
+    sync_col1, sync_col2 = st.columns(2)
+
+    with sync_col1:
+        if st.button("Sync Selected ABC Club", use_container_width=True):
             try:
-                events = fetch_calendar_events()
+                events = fetch_calendar_events(selected_abc_club)
                 imported_count = 0
 
                 for e in events:
                     add_calendar_event(
                         trainer_email=e.get("trainer_email") or "",
                         trainer_name=e.get("trainer_name") or "Unknown Trainer",
-                        club="Ridgefield",
+                        club=e["club"],
                         event_date=e["date"],
                         start_time=e["start"],
                         end_time=e["end"],
@@ -2188,31 +2203,86 @@ def render_master_calendar_tab():
                     )
                     imported_count += 1
 
-                st.success(f"ABC sync completed. Imported {imported_count} event(s).")
+                st.success(
+                    f"ABC sync completed for {selected_abc_club}. Imported {imported_count} event(s)."
+                )
                 st.rerun()
+
+            except Exception as e:
+                st.error(f"ABC calendar sync failed for {selected_abc_club}: {e}")
+
+    with sync_col2:
+        if st.button("Sync All ABC Clubs", use_container_width=True):
+            try:
+                total_imported = 0
+
+                for club_name in ABC_CLUBS.keys():
+                    events = fetch_calendar_events(club_name)
+
+                    for e in events:
+                        add_calendar_event(
+                            trainer_email=e.get("trainer_email") or "",
+                            trainer_name=e.get("trainer_name") or "Unknown Trainer",
+                            club=e["club"],
+                            event_date=e["date"],
+                            start_time=e["start"],
+                            end_time=e["end"],
+                            event_title=e["title"],
+                            notes="Imported from ABC",
+                            external_source="ABC",
+                            external_event_id=e["external_event_id"],
+                        )
+                        total_imported += 1
+
+                st.success(
+                    f"ABC sync completed for all clubs. Imported {total_imported} event(s)."
+                )
+                st.rerun()
+
             except Exception as e:
                 st.error(f"ABC calendar sync failed: {e}")
 
-    with col2:
-        st.info("ABC source club number: 9559")
+    st.divider()
 
     events = get_calendar_events()
     if events.empty:
         st.info("No trainer calendar events yet.")
         return
 
-    selected_calendar_club = st.selectbox("Filter Calendar by Club", ["All"] + CLUBS, key="director_calendar_club")
+    selected_calendar_club = st.selectbox(
+        "Filter Calendar by Club",
+        ["All"] + CLUBS,
+        key="director_calendar_club",
+    )
+
     event_source = events.copy()
     if selected_calendar_club != "All":
         event_source = event_source[event_source["club"] == selected_calendar_club]
 
-    trainer_options = ["All"] + sorted(event_source["trainer_name"].astype(str).unique().tolist())
-    selected_calendar_trainer = st.selectbox("Filter Calendar by Trainer", trainer_options, key="director_calendar_trainer")
+    trainer_options = ["All"] + sorted(
+        event_source["trainer_name"].astype(str).unique().tolist()
+    )
+    selected_calendar_trainer = st.selectbox(
+        "Filter Calendar by Trainer",
+        trainer_options,
+        key="director_calendar_trainer",
+    )
+
     if selected_calendar_trainer != "All":
         event_source = event_source[event_source["trainer_name"] == selected_calendar_trainer]
 
-    calendar_view = st.selectbox("Calendar View", ["Day", "Week", "Month"], key="director_calendar_view")
-    calendar_anchor_date = st.date_input("Calendar Date", value=datetime.now(EST).date(), key="director_calendar_anchor")
+    calendar_view = st.selectbox(
+        "Calendar View",
+        ["Day", "Week", "Month"],
+        key="director_calendar_view",
+    )
+
+    calendar_anchor_date = st.date_input(
+        "Calendar Date",
+        value=datetime.now(EST).date(),
+        key="director_calendar_anchor",
+    )
+
     master_view_df = build_calendar_view(event_source, calendar_view, calendar_anchor_date)
 
     if master_view_df.empty:
@@ -2220,15 +2290,30 @@ def render_master_calendar_tab():
     else:
         st.dataframe(master_view_df, use_container_width=True, hide_index=True)
 
-    event_source = event_source.copy()
-    event_source["start_time"] = event_source["start_time"].astype(str).str.slice(0, 5)
-    event_source["end_time"] = event_source["end_time"].astype(str).str.slice(0, 5)
+    st.write("### All Active Calendar Events")
+
+    events_table = event_source.copy()
+    events_table["start_time"] = events_table["start_time"].astype(str).str.slice(0, 5)
+    events_table["end_time"] = events_table["end_time"].astype(str).str.slice(0, 5)
+
+    display_cols = [
+        "event_date",
+        "start_time",
+        "end_time",
+        "trainer_name",
+        "club",
+        "event_title",
+        "notes",
+    ]
+
+    if "external_source" in events_table.columns:
+        display_cols.append("external_source")
+
     st.dataframe(
-        event_source[["event_date", "start_time", "end_time", "trainer_name", "club", "event_title", "notes", "external_source"]],
+        events_table[display_cols],
         use_container_width=True,
         hide_index=True,
     )
-
 
 def render_scoring_setup_tab():
     settings = get_settings()
