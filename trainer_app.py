@@ -2,7 +2,8 @@
 # Club 24 - Multi-Club PT Management System
 # Includes trainer logins, weekly KPI submission, document center,
 # trainer calendar, director master calendar, client roster,
-# action dashboard, lead pipeline, reactivation board, and coaching log.
+# action dashboard, lead pipeline, reactivation board, coaching log,
+# and ABC calendar sync.
 
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
@@ -19,7 +20,8 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
-import fitz
+from abc_calendar_sync import fetch_calendar_events
+
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -353,6 +355,8 @@ def init_db():
                     end_time TIME NOT NULL,
                     event_title VARCHAR(255) NOT NULL,
                     notes TEXT,
+                    external_source VARCHAR(50),
+                    external_event_id VARCHAR(255),
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -360,6 +364,12 @@ def init_db():
                 """
             )
         )
+
+        for alter_sql in [
+            "ALTER TABLE trainer_calendar_events ADD COLUMN IF NOT EXISTS external_source VARCHAR(50)",
+            "ALTER TABLE trainer_calendar_events ADD COLUMN IF NOT EXISTS external_event_id VARCHAR(255)",
+        ]:
+            conn.execute(text(alter_sql))
 
         conn.execute(
             text(
@@ -797,30 +807,57 @@ def add_calendar_event(
     end_time: time,
     event_title: str,
     notes: str,
+    external_source: Optional[str] = None,
+    external_event_id: Optional[str] = None,
 ):
     engine = get_engine()
     with engine.begin() as conn:
+        if external_source and external_event_id:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM trainer_calendar_events
+                    WHERE external_source = :external_source
+                      AND external_event_id = :external_event_id
+                      AND is_active = TRUE
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "external_source": external_source,
+                    "external_event_id": external_event_id,
+                },
+            ).fetchone()
+
+            if existing:
+                return
+
         conn.execute(
             text(
                 """
                 INSERT INTO trainer_calendar_events (
                     trainer_email, trainer_name, club, event_date, start_time, end_time,
-                    event_title, notes, is_active, created_at, updated_at
+                    event_title, notes, external_source, external_event_id,
+                    is_active, created_at, updated_at
                 ) VALUES (
                     :trainer_email, :trainer_name, :club, :event_date, :start_time, :end_time,
-                    :event_title, :notes, TRUE, :created_at, :updated_at
+                    :event_title, :notes, :external_source, :external_event_id,
+                    TRUE, :created_at, :updated_at
                 )
                 """
             ),
             {
-                "trainer_email": trainer_email.strip().lower(),
-                "trainer_name": trainer_name.strip(),
+                "trainer_email": trainer_email.strip().lower() if trainer_email else "",
+                "trainer_name": trainer_name.strip() if trainer_name else "",
                 "club": club,
                 "event_date": event_date,
                 "start_time": start_time,
                 "end_time": end_time,
                 "event_title": event_title.strip(),
                 "notes": notes.strip(),
+                "external_source": external_source,
+                "external_event_id": external_event_id,
                 "created_at": datetime.now(EST),
                 "updated_at": datetime.now(EST),
             },
@@ -830,7 +867,7 @@ def add_calendar_event(
 def get_calendar_events(trainer_email: Optional[str] = None, club: Optional[str] = None) -> pd.DataFrame:
     base_query = """
         SELECT id, trainer_email, trainer_name, club, event_date, start_time, end_time,
-               event_title, notes, created_at, updated_at
+               event_title, notes, external_source, external_event_id, created_at, updated_at
         FROM trainer_calendar_events
         WHERE is_active = TRUE
     """
@@ -1618,58 +1655,17 @@ def preview_document(doc_record: Dict):
 
     try:
         if file_ext == "pdf":
-            st.divider()
-            st.write("### PDF Preview")
-
-            pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
-
-            if pdf_doc.page_count == 0:
-                st.info("This PDF has no pages.")
-                return
-
-            page_limit = st.number_input(
-                "Pages to preview",
-                min_value=1,
-                max_value=pdf_doc.page_count,
-                value=min(5, pdf_doc.page_count),
-                step=1,
-                key=f"pdf_page_limit_{doc_record['id']}",
-            )
-
-            zoom = 1.5
-            matrix = fitz.Matrix(zoom, zoom)
-
-            for page_num in range(page_limit):
-                page = pdf_doc.load_page(page_num)
-                pix = page.get_pixmap(matrix=matrix)
-                img_bytes = pix.tobytes("png")
-
-                st.write(f"Page {page_num + 1}")
-                st.image(img_bytes, use_container_width=True)
-
-            if pdf_doc.page_count > page_limit:
-                st.info(f"Showing first {page_limit} pages out of {pdf_doc.page_count} total pages.")
-
+            st.info("PDF preview can vary by browser. Use Download if preview does not render.")
         elif file_ext in ["png", "jpg", "jpeg"]:
             st.image(file_bytes, use_container_width=True)
-
         elif file_ext == "txt":
-            st.text_area(
-                "Text Preview",
-                file_bytes.decode("utf-8", errors="ignore"),
-                height=400,
-                disabled=True,
-            )
-
+            st.text_area("Text Preview", file_bytes.decode("utf-8", errors="ignore"), height=400, disabled=True)
         elif file_ext == "csv":
             st.dataframe(pd.read_csv(io.BytesIO(file_bytes)), use_container_width=True)
-
         elif file_ext in ["xlsx", "xls"]:
             st.dataframe(pd.read_excel(io.BytesIO(file_bytes)), use_container_width=True)
-
         else:
             st.info("Preview not available for this file type. Use the buttons above to open or download it.")
-
     except Exception as e:
         st.warning(f"Preview could not be generated for this file: {e}")
 
@@ -1707,6 +1703,9 @@ def trainer_options_df() -> pd.DataFrame:
     )
 
 
+# -------------------------------------------------
+# UI SECTIONS
+# -------------------------------------------------
 def render_change_password_tab(user: Dict):
     st.write("### Change Password")
     st.caption("Use this to update your own login password.")
@@ -2166,29 +2165,69 @@ def render_dashboard_tab(user: Dict):
 
 def render_master_calendar_tab():
     st.write("### Master Calendar")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Sync ABC Calendar for Ridgefield", use_container_width=True):
+            try:
+                events = fetch_calendar_events()
+                imported_count = 0
+
+                for e in events:
+                    add_calendar_event(
+                        trainer_email=e.get("trainer_email") or "",
+                        trainer_name=e.get("trainer_name") or "Unknown Trainer",
+                        club="Ridgefield",
+                        event_date=e["date"],
+                        start_time=e["start"],
+                        end_time=e["end"],
+                        event_title=e["title"],
+                        notes="Imported from ABC",
+                        external_source="ABC",
+                        external_event_id=e["external_event_id"],
+                    )
+                    imported_count += 1
+
+                st.success(f"ABC sync completed. Imported {imported_count} event(s).")
+                st.rerun()
+            except Exception as e:
+                st.error(f"ABC calendar sync failed: {e}")
+
+    with col2:
+        st.info("ABC source club number: 9559")
+
     events = get_calendar_events()
     if events.empty:
         st.info("No trainer calendar events yet.")
         return
+
     selected_calendar_club = st.selectbox("Filter Calendar by Club", ["All"] + CLUBS, key="director_calendar_club")
     event_source = events.copy()
     if selected_calendar_club != "All":
         event_source = event_source[event_source["club"] == selected_calendar_club]
+
     trainer_options = ["All"] + sorted(event_source["trainer_name"].astype(str).unique().tolist())
     selected_calendar_trainer = st.selectbox("Filter Calendar by Trainer", trainer_options, key="director_calendar_trainer")
     if selected_calendar_trainer != "All":
         event_source = event_source[event_source["trainer_name"] == selected_calendar_trainer]
+
     calendar_view = st.selectbox("Calendar View", ["Day", "Week", "Month"], key="director_calendar_view")
     calendar_anchor_date = st.date_input("Calendar Date", value=datetime.now(EST).date(), key="director_calendar_anchor")
     master_view_df = build_calendar_view(event_source, calendar_view, calendar_anchor_date)
+
     if master_view_df.empty:
         st.info(f"No events in this {calendar_view.lower()} view.")
     else:
         st.dataframe(master_view_df, use_container_width=True, hide_index=True)
+
     event_source = event_source.copy()
     event_source["start_time"] = event_source["start_time"].astype(str).str.slice(0, 5)
     event_source["end_time"] = event_source["end_time"].astype(str).str.slice(0, 5)
-    st.dataframe(event_source[["event_date", "start_time", "end_time", "trainer_name", "club", "event_title", "notes"]], use_container_width=True, hide_index=True)
+    st.dataframe(
+        event_source[["event_date", "start_time", "end_time", "trainer_name", "club", "event_title", "notes", "external_source"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def render_scoring_setup_tab():
